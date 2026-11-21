@@ -1,3 +1,11 @@
+# nanochat (michaelp91-dev fork)
+
+Upstream [karpathy/nanochat](https://github.com/karpathy/nanochat) with small, opt-in additions (default behavior is unchanged):
+
+- **Train while downloading**: `python -m nanochat.dataset -n N &` now fetches the val shard first and train shards in order, and `base_train --wait-for-shards N` waits for each shard instead of only using what's on disk.
+- **Checkpoint pushes**: `base_train --hf-repo user/repo [--hf-push-every STEPS]` uploads each saved checkpoint (and the tokenizer) to a private HF repo in the background (`HF_TOKEN` env), keeping only the latest; `python -m nanochat.hf_hub pull` restores it for `--resume-from-step`. `--keep-checkpoints N` prunes old local checkpoints.
+- Colab notebook: [notebooks/nanochat-d16-colab.ipynb](notebooks/nanochat-d16-colab.ipynb) (d16, single A100, ~5.4B tokens).
+
 # nanochat
 
 ![nanochat logo](dev/nanochat.png)
