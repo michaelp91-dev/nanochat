@@ -81,6 +81,33 @@ def parquets_iter_batched(split, start=0, step=1):
             yield texts
 
 # -----------------------------------------------------------------------------
+# Streaming: train while the shards are still downloading (base_train --wait-for-shards N)
+DONE_MARKER = "DOWNLOAD_DONE" # written by `python -m nanochat.dataset` after its last download
+
+def wait_for_parquet_file(filepath, poll_seconds=5):
+    """ Block until filepath exists. Raises if the downloader finished without producing it. """
+    waited = 0
+    while not os.path.exists(filepath):
+        # check the marker before re-checking the file: the downloader writes it after its last rename
+        done = os.path.exists(os.path.join(os.path.dirname(filepath), DONE_MARKER))
+        if os.path.exists(filepath):
+            break
+        if done:
+            raise FileNotFoundError(f"{filepath} does not exist and the download is done (did it fail? re-run python -m nanochat.dataset)")
+        if waited % 60 == 0:
+            print(f"Waiting for {os.path.basename(filepath)} to finish downloading...", flush=True)
+        time.sleep(poll_seconds)
+        waited += poll_seconds
+    return filepath
+
+def streaming_parquet_paths(split, num_train_shards, data_dir=None):
+    """ The exact files a download of `-n num_train_shards` will produce, in order, whether or not they exist yet. """
+    data_dir = DATA_DIR if data_dir is None else data_dir
+    if split == "train":
+        return [os.path.join(data_dir, index_to_filename(i)) for i in range(min(num_train_shards, MAX_SHARD))]
+    return [os.path.join(data_dir, index_to_filename(MAX_SHARD))]
+
+# -----------------------------------------------------------------------------
 def download_single_file(index):
     """ Downloads a single file index, with some backoff """
 
@@ -145,15 +172,22 @@ if __name__ == "__main__":
     # The way this works is that the user specifies the number of train shards to download via the -n flag.
     # In addition to that, the validation shard is *always* downloaded and is pinned to be the last shard.
     num_train_shards = MAX_SHARD if args.num_files == -1 else min(args.num_files, MAX_SHARD)
-    ids_to_download = list(range(num_train_shards))
-    ids_to_download.append(MAX_SHARD) # always download the validation shard
+    # validation shard first, then train shards in order, so that training with
+    # --wait-for-shards can start as soon as the first few are on disk
+    ids_to_download = [MAX_SHARD] + list(range(num_train_shards))
+    done_path = os.path.join(DATA_DIR, DONE_MARKER)
+    if os.path.exists(done_path):
+        os.remove(done_path)
 
     # Download the shards
     print(f"Downloading {len(ids_to_download)} shards using {args.num_workers} workers...")
     print(f"Target directory: {DATA_DIR}")
     print()
     with Pool(processes=args.num_workers) as pool:
-        results = pool.map(download_single_file, ids_to_download)
+        results = list(pool.imap(download_single_file, ids_to_download))
+    # signal streaming readers that no more files are coming
+    with open(done_path, "w") as f:
+        f.write(f"{num_train_shards}\n")
 
     # Report results
     successful = sum(1 for success in results if success)

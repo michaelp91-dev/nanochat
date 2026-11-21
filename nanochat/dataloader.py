@@ -20,22 +20,29 @@ import torch
 import pyarrow.parquet as pq
 
 from nanochat.common import get_dist_info
-from nanochat.dataset import list_parquet_files
+from nanochat.dataset import list_parquet_files, streaming_parquet_paths, wait_for_parquet_file
 
-def _document_batches(split, resume_state_dict, tokenizer_batch_size):
+def _document_batches(split, resume_state_dict, tokenizer_batch_size, wait_for_shards=0):
     """
     Infinite iterator over document batches (list of text strings) from parquet files.
 
     Handles DDP sharding and approximate resume. Each yield is (text_batch, (pq_idx, rg_idx, epoch))
     where text_batch is a list of document strings, indices track position for resumption,
     and epoch counts how many times we've cycled through the dataset (starts at 1).
+
+    If wait_for_shards > 0, the shards may still be downloading (python -m nanochat.dataset -n wait_for_shards):
+    we iterate over the files that download will produce and wait for each one to appear, instead of
+    only using whatever is on disk right now.
     """
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
 
-    warn_on_legacy = ddp_rank == 0 and split == "train" # rank 0 on train split will warn on legacy
-    parquet_paths = list_parquet_files(warn_on_legacy=warn_on_legacy)
-    assert len(parquet_paths) != 0, "No dataset parquet files found, did you run dataset.py?"
-    parquet_paths = parquet_paths[:-1] if split == "train" else parquet_paths[-1:]
+    if wait_for_shards > 0:
+        parquet_paths = streaming_parquet_paths(split, wait_for_shards)
+    else:
+        warn_on_legacy = ddp_rank == 0 and split == "train" # rank 0 on train split will warn on legacy
+        parquet_paths = list_parquet_files(warn_on_legacy=warn_on_legacy)
+        assert len(parquet_paths) != 0, "No dataset parquet files found, did you run dataset.py?"
+        parquet_paths = parquet_paths[:-1] if split == "train" else parquet_paths[-1:]
 
     resume_pq_idx = resume_state_dict["pq_idx"] if resume_state_dict is not None else 0
     resume_rg_idx = resume_state_dict["rg_idx"] if resume_state_dict is not None else None
@@ -48,6 +55,8 @@ def _document_batches(split, resume_state_dict, tokenizer_batch_size):
         pq_idx = resume_pq_idx if first_pass else 0
         while pq_idx < len(parquet_paths):
             filepath = parquet_paths[pq_idx]
+            if wait_for_shards > 0:
+                wait_for_parquet_file(filepath)
             pf = pq.ParquetFile(filepath)
             # Start from resume point if resuming on same file, otherwise from DDP rank
             if first_pass and (resume_rg_idx is not None) and (pq_idx == resume_pq_idx):
@@ -75,7 +84,7 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
     tokenizer, B, T, split,
     tokenizer_threads=4, tokenizer_batch_size=128,
     device="cuda", resume_state_dict=None,
-    buffer_size=1000
+    buffer_size=1000, wait_for_shards=0
 ):
     """
     BOS-aligned dataloader with Best-Fit Cropping.
@@ -96,7 +105,7 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
     assert split in ["train", "val"], "split must be 'train' or 'val'"
 
     row_capacity = T + 1
-    batches = _document_batches(split, resume_state_dict, tokenizer_batch_size)
+    batches = _document_batches(split, resume_state_dict, tokenizer_batch_size, wait_for_shards)
     bos_token = tokenizer.get_bos_token_id()
     doc_buffer = []
     pq_idx, rg_idx, epoch = 0, 0, 1
