@@ -13,7 +13,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-os.environ.setdefault("NANOCHAT_BASE_DIR", tempfile.mkdtemp(prefix="nanochat_stream_test_"))
+os.environ["NANOCHAT_BASE_DIR"] = tempfile.mkdtemp(prefix="nanochat_stream_test_")
 from nanochat import dataset  # noqa: E402
 from nanochat.dataloader import _document_batches  # noqa: E402
 

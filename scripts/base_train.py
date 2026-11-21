@@ -30,6 +30,7 @@ from nanochat.dataloader import tokenizing_distributed_data_loader_bos_bestfit, 
 from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized
 from nanochat.tokenizer import get_tokenizer, get_token_bytes
 from nanochat.checkpoint_manager import save_checkpoint, load_checkpoint
+from nanochat.hf_hub import stage_and_push, prune_checkpoints
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.engine import Engine
 from nanochat.flash_attention import HAS_FA3
@@ -79,6 +80,10 @@ parser.add_argument("--sample-every", type=int, default=2000, help="sample from 
 parser.add_argument("--save-every", type=int, default=-1, help="save checkpoints every N steps (-1 = only at end)")
 # Output
 parser.add_argument("--model-tag", type=str, default=None, help="override model tag for checkpoint directory name")
+parser.add_argument("--keep-checkpoints", type=int, default=0, help="keep only the newest N checkpoints on disk (0 = keep all)")
+# Hugging Face Hub
+parser.add_argument("--hf-repo", type=str, default=None, help="push saved checkpoints to this HF model repo in the background (created private, needs HF_TOKEN env)")
+parser.add_argument("--hf-push-every", type=int, default=0, help="push a checkpoint at most every N steps (0 = every save; the last one is always pushed)")
 args = parser.parse_args()
 user_config = vars(args).copy()  # for logging
 # -----------------------------------------------------------------------------
@@ -405,6 +410,8 @@ else:
     smooth_train_loss = loop_state["smooth_train_loss"]
     total_training_time = loop_state["total_training_time"]
 
+hf_last_push_step = step # the checkpoint we start from (if any) is already on disk / the hub
+
 # Figure out the needed gradient accumulation micro-steps to reach the desired total batch size per step
 tokens_per_fwdbwd = args.device_batch_size * args.max_seq_len # tokens per iteration for a single rank
 world_tokens_per_fwdbwd = tokens_per_fwdbwd * ddp_world_size # total tokens per iteration for all ranks
@@ -499,6 +506,15 @@ while True:
             },
             rank=ddp_rank,
         )
+        if args.hf_repo or args.keep_checkpoints > 0:
+            if ddp:
+                dist.barrier() # every rank has written its optimizer shard
+            if master_process:
+                if args.hf_repo and (args.hf_push_every <= 0 or last_step or step // args.hf_push_every > hf_last_push_step // args.hf_push_every):
+                    stage_and_push(checkpoint_dir, step, args.hf_repo)
+                    hf_last_push_step = step
+                if args.keep_checkpoints > 0:
+                    prune_checkpoints(checkpoint_dir, args.keep_checkpoints)
 
     # termination conditions (TODO: possibly also add loss explosions etc.)
     if last_step:
